@@ -1,0 +1,890 @@
+<html>
+<head>
+	<script type="text/javascript" src="prototype.js"></script>
+	<script type="text/javascript" src="sprintf.js"></script>
+</head>
+<body style="background: #000; margin: 0px auto; text-align: center;">
+<div id="viewport" width="1024">
+	<canvas id="canvas" width="1024" height="768" style="background: #000; border: 1px solid #333; cursor: crosshair;"></canvas>
+</div>               
+
+<div id="assets" style="display: none;">
+	<audio src="final.mp3" preload="auto" id="game_music"></audio>
+	<audio src="Fx5.wav" preload="auto" id="sfx5"></audio>
+	<audio src="Fx6.wav" preload="auto" id="sfx6"></audio>
+	<audio src="Fx18.wav" preload="auto" id="sfx18"></audio>
+	<audio src="Fx23.wav" preload="auto" id="sfx23"></audio>
+</div>                                                                                  
+
+<script type="text/javascript">
+var spaceship;
+var earth;
+var bomb_sprite;
+var rocket_light;
+var stars;
+var menu;
+var canvas;
+var saved_sprite;
+var time_sprite;
+var earth_halo;
+var gameover;
+var ctx;
+var rendered_frames = 0;
+var earth_frame = 0;
+var RAD2DEG = (Math.PI/180.0);
+
+var ships = new Array();
+var lasers = new Array();
+var bombs = new Array();
+var explosions = new Array();
+
+var ship_sprites = new Array();
+var earth_sprites = new Array();
+var particle1_sprites = new Array();
+var particle2_sprites = new Array();
+
+var last_ship_sent = 0;
+var delay_between_ships = 1000;
+
+var last_laser_sent = 0;
+var delay_between_lasers = 500;
+var laser_decay_time = 500;
+
+var score = 0;
+var start_time = 0;
+var now;
+var game_state = 0;
+
+function load_ship_sprites()
+{
+	for (var i=1; i<=40; i++)
+	{
+		var im = new Image();
+		im.src = "rockett/rockett_" + i + ".png";
+		ship_sprites.push(im);
+	}
+}
+
+function load_earth_sprites()
+{
+	for (var i=1; i<=37; i++)
+	{
+		var im = new Image();
+		im.src = "ef/ef_" + i + ".png";
+		earth_sprites.push(im);
+	}
+}
+
+function load_particle1_sprites()
+{
+	for (var i=2; i<=24; i++)
+	{
+		var im = new Image();
+		im.src = "particle1/particle_" + i + ".png";
+		particle1_sprites.push(im);
+	}
+}
+
+function load_particle2_sprites()
+{
+	for (var i=3; i<=24; i++)
+	{
+		var im = new Image();
+		im.src = "particle2/particle_" + i + " copy.png";
+		particle2_sprites.push(im);
+	}
+}
+
+function Bomb(x, y)
+{
+	this.x = x;
+	this.y = y;
+	this.phase = 0;
+	this.size = 0;
+	this.start_time = +new Date();
+
+	this.collides = function(x, y)
+	{              		
+		/*
+		ctx.arc(dx, dy, 2, 0, 2*Math.PI, true);
+		ctx.fill();
+
+		ctx.beginPath();
+		ctx.globalAlpha = 1.0;
+		ctx.strokeStyle = "#f0f";
+		ctx.arc(this.x, this.y, this.size/2, 0, 2*Math.PI, true);
+		ctx.stroke();
+		*/
+
+		var dx = (this.x - x);
+		var dy = (this.y - y);
+		var distance = Math.sqrt(dx*dx + dy*dy);
+		var radius = (this.size*0.5);
+		var hit = distance < radius;
+		return hit;
+	}
+
+	this.draw = function()
+	{
+		var p;
+
+		switch(this.phase)
+		{
+			case 0:
+			// blowing up
+			p = (now - this.start_time)/256.0;
+			if (p > 1.0)
+			{
+				p = 1.0;
+				this.phase = 1;
+			}
+			break;
+
+			case 1:
+			p = 1.0 - (now - this.start_time - 256)/256.0;
+			if (p < 0)
+			{
+				this.phase = 3;
+				p = 0.0;
+			}
+			break;
+		}
+
+		this.size = bomb_sprite.width*p;
+		ctx.drawImage(bomb_sprite, 0, 0, bomb_sprite.width, bomb_sprite.height, this.x-bomb_sprite.width*p/2, this.y-bomb_sprite.height*p/2, this.size, this.size);
+	}
+
+	return this;
+}
+
+function rand()
+{
+	return Math.floor(Math.random() * 2147483647);
+}
+
+function Laser(target_ship)
+{	                          	
+	if (target_ship.targetted)
+	{
+		// bug :)
+		return;
+	}
+
+	target_ship.targetted = true;
+
+	this.target_ship = target_ship;
+
+	switch(rand() % 4)
+	{
+		case 0:
+		// top
+		this.origin_y = 0;
+		this.origin_x = rand() % 1024;
+		break;
+
+		case 1:
+		// left
+		this.origin_x = 0;
+		this.origin_y = rand() % 768;
+		break;
+
+		case 2:
+		// right
+		this.origin_x = 1024;
+		this.origin_y = rand() % 768;
+		break;
+
+		case 3:
+		// bottom
+		this.origin_y = 768;
+		this.origin_x = rand() % 1024;
+		break;
+	}
+
+	var hit_duration = 4500 + rand() % 5500;
+
+	var pos = target_ship.getProjectory(hit_duration);
+
+	this.target_x = pos[0];
+	this.target_y = pos[1];
+	this.start_time = +new Date();
+	this.expected_hit_time = this.start_time + hit_duration;
+	this.hit_time = 0;
+	this.opacity = 1.0;
+	this.done = false;
+
+	this.getPosition = function()
+	{
+		var elapsed = now - this.start_time;
+		var p = elapsed/(this.expected_hit_time - this.start_time);
+		var dx = this.origin_x + (this.target_x - this.origin_x)*p;
+		var dy = this.origin_y + (this.target_y - this.origin_y)*p;
+
+		return {x: dx, y: dy};
+	}
+
+	return this;
+}
+
+function Ship(angle, velocity)
+{
+	this.angle = angle;
+	this.velocity = velocity;
+	this.distance = 0.0;
+	this.targetted = false;
+	this.frame = 0;
+	this.done = false;
+	this.exploded = false;
+	
+	this.saved = function()
+	{
+		return (this.getX() < -20 || this.getY() < -20 || this.getX() > canvas.width || this.getY() > canvas.height); 
+	}
+
+	this.getX = function()
+	{
+		var cx = canvas.width/2 - 26;
+		return cx + Math.cos(RAD2DEG*this.angle)*this.distance;
+	}
+
+	this.getY = function()
+	{
+		var cy = canvas.height/2 - 24;
+		return cy - Math.sin(RAD2DEG*this.angle)*this.distance;
+	}
+
+	this.getProjectory = function(ms)
+	{
+		var x = canvas.width/2;
+		var y = canvas.height/2;
+		// return position of ship within ms milliseconds
+		return [x, y];
+	}
+
+	this.explode = function()
+	{
+		this.done = true;
+		start_explosion(this.getX()+50/2, this.getY()+50/2, 1);
+		play_sfx("sfx6");
+	}
+
+	this.collides = function(px, py)
+	{
+		var x = this.getX();
+		var y = this.getY();
+		var alpha = RAD2DEG*(90-this.angle);
+
+		ctx.save();
+		ctx.translate(x+(50/2), y+(50/2));
+		ctx.rotate(alpha);
+		ctx.beginPath();
+		ctx.strokeStyle = "#f0f";
+		ctx.moveTo(-50/2, -50/2);
+		ctx.lineTo(+50/2, -50/2);
+		ctx.lineTo(+50/2, +50/2);
+		ctx.lineTo(-50/2, +50/2);
+		ctx.lineTo(-50/2, -50/2);
+		//ctx.stroke();
+
+		var hit = ctx.isPointInPath(px, py);
+		ctx.closePath();	
+		ctx.restore();
+		return hit;
+	}
+
+	this.draw = function()
+	{
+		if (this.exploded == false)
+		{
+			this.distance += this.velocity;
+
+			this.frame++;
+			if (this.frame >= ship_sprites.length)
+			{
+				this.frame = 0;
+			}
+
+			var x = this.getX();
+			var y = this.getY();
+			var alpha = RAD2DEG*(90-this.angle);
+
+			var im = ship_sprites[this.frame];
+       	
+			ctx.save();
+			ctx.translate(x+(50/2), y+(50/2));
+			ctx.rotate(alpha);
+			ctx.drawImage(im, 0, 0, im.width, im.height, -50/2, -50/2, 50, 50);
+
+			/*
+			ctx.strokeStyle = "#f0f";
+			ctx.beginPath();
+			ctx.moveTo(-50/2, -50/2);
+			ctx.lineTo(+50/2, -50/2);
+			ctx.lineTo(+50/2, +50/2);
+			ctx.lineTo(-50/2, +50/2);
+			ctx.lineTo(-50/2, -50/2);
+			ctx.stroke();	
+			*/
+
+			ctx.restore();
+		}
+	}
+
+	return this;
+}
+
+function create_new_ship(angle, velocity)
+{
+	var s = new Ship(angle, velocity);
+	ships.push(s);
+	return s;
+}
+
+function create_new_bomb(x, y)
+{
+	var b = new Bomb(x, y);
+	bombs.push(b);
+
+	play_sfx("sfx18");
+	return b;
+}
+
+function on_click(e)
+{
+	var x = e.offsetX;
+	var y = e.offsetY;
+
+	switch(game_state)
+	{
+		case 0:
+		menu_click(x, y);
+		break;
+
+		case 1:
+		game_click(x, y);
+		break;
+	}
+}
+
+function game_click(x, y)
+{
+	if (x < 10 && y < 10)
+	{
+		if (game_music.currentTime < 165)
+		{
+			game_music.currentTime = 165.0;
+			return;
+		}
+	}
+
+	create_new_bomb(x, y);
+}
+
+function reset()
+{
+	last_laser_sent = 0;
+	last_ship_sent = 0;
+	score = 0;
+
+	ships = new Array();
+	lasers = new Array();
+	bombs = new Array();
+	explosions = new Array();
+}
+
+function init()
+{
+	spaceship = new Image();
+	spaceship.src = "spaceship16.png";
+
+	earth = new Image();
+	earth.src = "earth.png";
+
+	bomb_sprite = new Image();
+	bomb_sprite.src = "boom.png";
+
+	rocket_light = new Image();
+	rocket_light.src = "rocketlight.png";
+
+	menu = new Image();
+	menu.src = "Menu.png";
+
+	stars = new Image();
+	stars.src = "Stars.png";
+
+	saved_sprite = new Image();
+	saved_sprite.src = "saved.png";
+
+	time_sprite = new Image();
+	time_sprite.src = "time.png";
+
+	earth_halo = new Image();
+	earth_halo.src = "Earth_Halo.png";
+
+	earth_back = new Image();
+	earth_back.src = "earth_back.png";
+
+	gameover = new Image();
+	gameover.src = "gameover.png";
+
+	load_ship_sprites();
+        load_earth_sprites();
+	load_particle1_sprites();
+	load_particle2_sprites();
+
+	canvas = $("canvas");
+	ctx = canvas.getContext("2d");
+
+	canvas.addEventListener("click", on_click, false);
+}
+
+function Explosion(x, y, type)
+{
+	this.x = x;
+	this.y = y;
+	this.frame = 0;
+	this.complete = false;
+	this.start_time = now;
+	this.duration = 500;
+	this.end_time = this.start_time + this.duration;
+	this.frames = (type == 1 ? particle1_sprites : particle2_sprites);
+
+	this.draw = function()
+	{
+		if (now < this.end_time)
+		{
+			var frame = Math.floor(((now - this.start_time)/this.duration)*(this.frames.length-1));
+		
+			var im = this.frames[frame];
+			ctx.drawImage(im, 0, 0, im.width, im.height, this.x-100/2.0, this.y-100/2.0, 100, 100);
+		}
+		else
+		{
+			this.complete = true;
+		}
+	}
+
+	return this;
+}
+
+function start_explosion(x, y, type)
+{
+	var e = new Explosion(x, y, type);
+	explosions.push(e);
+	return e;	
+}
+
+function check_laser_earth_collision(laser)
+{
+	if (laser.hit_time == 0)
+	{
+		var pos = laser.getPosition();
+
+		var cx = canvas.width/2;
+		var cy = canvas.height/2;
+		var radius = 75;
+
+		var dx = (cx - pos.x);
+		var dy = (cy - pos.y);
+		var distance = Math.sqrt(dx*dx + dy*dy);
+		if (distance < radius)
+		{
+			laser.hit_time = now;
+			start_explosion(pos.x, pos.y, 1);
+			if (score > 0)
+			{
+				score -= 10;
+			}
+		}
+	}
+}
+
+function check_laser_ship_collision(laser)
+{
+	if (laser.hit_time == 0)
+	{
+		// still active
+		var laser_pos = laser.getPosition();
+		for (var i=0; i<ships.length; i++)
+		{
+			if (ships[i].collides(laser_pos.x, laser_pos.y))
+			{
+				ships[i].explode();
+				laser.hit_time = now;
+				break;
+			}
+		}
+	}
+}
+
+function check_laser_bomb_collision(laser)
+{
+	if (laser.hit_time == 0)
+	{
+		// laser still flying
+		var laser_pos = laser.getPosition();
+		for (var i=0; i<bombs.length; i++)
+		{
+			if (bombs[i].collides(laser_pos.x, laser_pos.y))
+			{
+				laser.hit_time = now;
+				start_explosion(laser_pos.x, laser_pos.y, 2);
+				play_sfx("sfx5");
+			}
+		}
+	}
+}
+
+function play_sfx(id)
+{
+	var e = $(id).cloneNode();
+	e.volume = 0.50;
+	e.play();
+}
+
+function check_bomb_ship_collision(bomb)
+{
+	for (var i=0; i<ships.length; i++)
+	{
+		var dx = (bomb.x - ships[i].getX());
+		var dy = (bomb.y - ships[i].getY());
+		var distance2 = (dx*dx + dy*dy);
+		var r = (bomb.size/2.0);
+		var r2 = (r * r);
+		var hit_distance2 = 15*15;
+		//console.log("Ship: " + i + " r2: " + r2 + " distance2 " + distance2 + " hit2 " + hit_distance2);
+
+		if (-hit_distance2 < r2 - distance2 && r2 - distance2 < +hit_distance2)
+		{
+			ships[i].explode();
+		}
+	}                      	
+}
+
+function draw_laser(laser)
+{
+	var elapsed = now - laser.start_time;
+	var opacity = 1.0;
+	var p;
+	if (laser.hit_time == 0 && now > laser.expected_hit_time)
+	{
+		// done
+		laser.hit_time = now;
+	}
+
+	if (laser.hit_time > 0)
+	{	
+		opacity = 1.0 - (now - laser.hit_time)/laser_decay_time;
+		if (opacity < 0)
+		{
+			opacity = 0;
+			laser.done = true;
+		}
+
+		p = (laser.hit_time-laser.start_time)/(laser.expected_hit_time-laser.start_time);
+	}
+	else
+	{
+		p = elapsed/(laser.expected_hit_time-laser.start_time);
+	}
+
+	var dx = laser.origin_x + (laser.target_x - laser.origin_x)*p;
+	var dy = laser.origin_y + (laser.target_y - laser.origin_y)*p;
+
+	ctx.save();
+	ctx.beginPath();
+	ctx.strokeStyle = "#fff";
+	ctx.lineWidth = 1;
+	ctx.globalAlpha = opacity;
+	ctx.moveTo(laser.origin_x, laser.origin_y);
+	ctx.lineTo(dx, dy);
+	ctx.stroke();
+	ctx.drawImage(rocket_light, dx - rocket_light.width/2, dy - rocket_light.height/2);
+	ctx.restore();
+}
+
+function draw_score()
+{
+	ctx.font = "24px Calibri bold";
+	ctx.fillStyle = "#fff";
+	ctx.fillText(sprintf("%04d", score), 10, 50+24);
+
+	ctx.drawImage(saved_sprite, 0, 0);
+}
+
+function draw_timer()
+{
+	var left = Math.floor((start_time + 180*1000 - now)/1000);
+	if (left < 0)
+	{
+		// game over!
+		left = 0;
+	}
+
+	var m = Math.floor(left/60);
+	var s = left%60;
+	var t = sprintf("%02d:%02d", m, s);
+	var w = ctx.measureText(t).width;
+
+	ctx.font = "24px Calibri bold";
+	ctx.fillStyle = "#fff";
+	ctx.fillText(t, canvas.width - w - 10, 50+24);
+
+	ctx.drawImage(time_sprite, canvas.width - time_sprite.width - 10, 0);
+}
+
+function create_new_laser(ship)
+{
+	var l = new Laser(ship);
+	lasers.push(l);
+	return l;
+}	
+
+function pick_random_untargetted_ship()
+{
+	var avail = new Array();
+	for (var i=0; i<ships.length; i++)
+	{
+		if (ships[i].targetted == false)
+		{                            	
+			avail.push(i);
+		}
+	}
+
+	if (avail.length > 0)
+	{
+		return avail[Math.floor(Math.random() * avail.length)];
+	}
+
+	return -1;
+}
+
+function send_out_new_ships()
+{
+	// send out more ships
+	if (last_ship_sent + delay_between_ships < now)
+	{
+		delay_between_ships *= 0.95;
+		if (delay_between_ships < 256)
+		{
+			delay_between_ships = 256;
+		}
+
+		var a = Math.floor(Math.random() * 360)
+		var v = 1.0 + (Math.random() * 0.3);
+		create_new_ship(a, v);
+		last_ship_sent = now;
+	}
+}
+
+function send_out_more_lasers()
+{
+	if (last_laser_sent + delay_between_lasers < now)
+	{
+		var ship = pick_random_untargetted_ship();
+		if (ship >= 0)
+		{
+			var ship = ships[ship];
+			create_new_laser(ship);
+			last_laser_sent = now;
+		}
+	}
+
+}
+
+function draw_earth()
+{
+	now = +new Date();
+
+	earth_frame = Math.floor((now - start_time)/(1000/16)) % earth_sprites.length;
+
+//	ctx.drawImage(earth, (canvas.width - earth.width)/2, (canvas.height - earth.height)/2);
+	var e = earth_sprites[earth_frame];
+
+	ctx.drawImage(earth_back, 0, 0, earth_back.width, earth_back.height, (canvas.width - 200)/2, (canvas.height - 200)/2, 200, 200);
+	ctx.drawImage(e, 0, 0, e.width, e.height, (canvas.width - 200)/2-2, (canvas.height - 200)/2-2, 200, 200);
+
+	ctx.globalAlpha = 0.6;
+	ctx.drawImage(earth_halo, 0, 0, earth_halo.width, earth_halo.height, (canvas.width - 200)/2, (canvas.height - 200)/2, 200, 200);
+	ctx.globalAlpha = 1.0;
+}
+
+function game_tick()
+{
+	now = +new Date();
+
+	send_out_new_ships();
+	send_out_more_lasers();
+
+	//ctx.clearRect(0, 0, canvas.width, canvas.height);
+	ctx.drawImage(stars, 0, 0);
+
+	var new_ships = new Array();
+	for (var i=0; i<ships.length; i++)
+	{
+		if (ships[i].saved())
+		{
+			score += 100;
+		}
+		else if (ships[i].done == false)
+		{
+			ships[i].draw();
+			new_ships.push(ships[i]);
+		}
+	}
+
+	ships = new_ships;
+	for (var i=0; i<lasers.length; i++)
+	{
+		draw_laser(lasers[i]);
+	}
+
+	// check collision
+	for (var i=0; i<lasers.length; i++)
+	{
+		check_laser_bomb_collision(lasers[i]);
+		check_laser_ship_collision(lasers[i]);
+		check_laser_earth_collision(lasers[i]);
+	}
+
+	// clean old lasers
+	var new_lasers = new Array();
+	for (var i=0; i<lasers.length; i++)
+	{
+		if (lasers[i].done == false)
+		{
+			new_lasers.push(lasers[i]);
+		}
+	}
+
+	lasers = new_lasers;
+
+	for (var i=0; i<bombs.length; i++)
+	{
+		bombs[i].draw();
+		check_bomb_ship_collision(bombs[i]);
+	}
+
+	// clean old bombs
+	var new_bombs = new Array();
+	for (var i=0; i<bombs.length; i++)
+	{
+		if (bombs[i].phase != 3)
+		{
+			new_bombs.push(bombs[i]);
+		}
+	}
+
+	bombs = new_bombs;
+
+	draw_earth();
+
+	var new_explosions = new Array();
+	for (var i=0; i<explosions.length; i++)
+	{
+		if (explosions[i].complete == false)
+		{
+			explosions[i].draw();
+			new_explosions.push(explosions[i]);
+		}
+	}
+
+	explosions = new_explosions;
+
+	draw_score();
+	draw_timer();
+
+	rendered_frames++;
+
+	if (game_music.currentTime > 181)
+	{
+		game_over();
+	}
+}
+
+function play()
+{
+	reset();
+	start_time = +new Date();
+	last_laser_sent = start_time;
+	game_state = 1;
+
+	game_music.play();
+}
+
+function menu_tick()
+{
+	ctx.drawImage(menu, 0, 0);
+	draw_earth();
+}
+
+function menu_click(x, y)
+{
+	if ((x >= 335) && (x <= 664) && (y >= 627) && (y <= 664))
+	{
+		play_sfx("sfx23");
+		play();
+	}
+}
+
+function game_over_tick()
+{
+	ctx.drawImage(gameover, 0, 0);
+
+	ctx.font = "24px Calibri bold";
+	ctx.fillStyle = "#888";
+
+	var text1 = sprintf("You saved %04d men and women", score);
+	var w1 = ctx.measureText(text1).width;
+	ctx.fillText(text1, (canvas.width-w1)/2, 400);
+
+	var text2 = "THEY ALL DIED THE NEXT DAY!";
+	var w2 = ctx.measureText(text2).width;
+	ctx.fillText(text2, (canvas.width-w2)/2, 450);
+}
+
+function game_over()
+{
+	game_state = 2;
+	setTimeout(function() { game_state = 0; }, 5000);
+}
+
+function tick()
+{
+	switch(game_state)
+	{
+		case 0:
+		menu_tick();
+		break;
+
+		case 1:
+		game_tick();
+		break;
+
+		case 2:
+		game_over_tick();
+		break;
+	}
+}
+
+function fps_update()
+{
+	console.log("fps: " + rendered_frames);
+	rendered_frames = 0;
+}
+
+function main()
+{
+	init();
+	var s = create_new_ship(45+90, 1);
+	setInterval(tick, 1000/60.0);
+	setInterval(fps_update, 1000);	
+}
+
+main();
+//play();
+
+</script>
+
+</body>
+</html>
